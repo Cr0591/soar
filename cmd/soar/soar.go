@@ -54,27 +54,26 @@ func main() {
 	}
 
 	// 环境初始化，连接检查线上环境+构建测试环境
-	vEnv, rEnv := env.BuildEnv()
 
 	// 使用 -cleanup-test-database 命令手动清理残余的 optimizer_xxx 数据库
 	if common.Config.CleanupTestDatabase {
-		vEnv.CleanupTestDatabase()
+		env.GetVirtualEnv().CleanupTestDatabase()
 		return
 	}
 
 	// 如果使用到测试环境，在这里环境清理
 	if common.Config.DropTestTemporary {
-		defer vEnv.CleanUp()
+		defer env.GetVirtualEnv().CleanUp()
 	}
 
 	// 当程序卡死的时候，或者由于某些原因程序没有退出，可以通过捕获信号量的形式让程序优雅退出并且清理测试环境
 	common.HandleSignal(func() {
-		shutdown(vEnv, rEnv)
+		shutdown(env.GetVirtualEnv(), env.GetRealEnv())
 	})
 
 	// 对指定的库表进行索引重复检查
 	if common.Config.ReportType == "duplicate-key-checker" {
-		dupKeySuggest := advisor.DuplicateKeyChecker(rEnv)
+		dupKeySuggest := advisor.DuplicateKeyChecker(env.GetRealEnv())
 		_, str := advisor.FormatSuggest("", currentDB, common.Config.ReportType, dupKeySuggest)
 		if str == "" {
 			fmt.Printf("%s/%s 未发现重复索引\n", common.Config.OnlineDSN.Addr, common.Config.OnlineDSN.Schema)
@@ -242,9 +241,9 @@ func main() {
 		// 在配置文件 ignore-rules 中添加 'IDX.*' 即可屏蔽索引优化建议
 		common.Log.Debug("start of index advisor Query: %s", q.Query)
 		if !advisor.IsIgnoreRule("IDX.") {
-			if vEnv.BuildVirtualEnv(rEnv, q.Query) {
-				idxAdvisor, err := advisor.NewAdvisor(vEnv, *rEnv, *q)
-				if err != nil || (idxAdvisor == nil && vEnv.Error == nil) {
+			if env.GetVirtualEnv().BuildVirtualEnv(env.GetRealEnv(), q.Query) {
+				idxAdvisor, err := advisor.NewAdvisor(env.GetVirtualEnv(), *env.GetRealEnv(), *q)
+				if err != nil || (idxAdvisor == nil && env.GetVirtualEnv().Error == nil) {
 					if idxAdvisor == nil {
 						// 如果 SQL 是 DDL 语句，则返回的 idxAdvisor 为 nil，可以忽略不处理
 						// TODO alter table add index 语句检查索引是否已经存在
@@ -254,7 +253,7 @@ func main() {
 					}
 				} else {
 					// 创建环境时没有出现错误，生成索引建议
-					if vEnv.Error == nil {
+					if env.GetVirtualEnv().Error == nil {
 						idxSuggest = idxAdvisor.IndexAdvise().Format()
 
 						// 依赖数据字典的启发式建议
@@ -263,20 +262,20 @@ func main() {
 						}
 					} else {
 						// 根据错误号输出建议
-						switch vEnv.Error.(*mysql.MySQLError).Number {
+						switch env.GetVirtualEnv().Error.(*mysql.MySQLError).Number {
 						case 1061:
 							idxSuggest["IDX.001"] = advisor.Rule{
 								Item:     "IDX.001",
 								Severity: "L2",
 								Summary:  "索引名称已存在",
-								Content:  strings.Trim(strings.Split(vEnv.Error.Error(), ":")[1], " "),
+								Content:  strings.Trim(strings.Split(env.GetVirtualEnv().Error.Error(), ":")[1], " "),
 								Case:     sql,
 							}
 						default:
 							// vEnv.VEnvBuild 阶段给出的 ERROR 是 ERR.001
 							delete(mysqlSuggest, "ERR.000")
-							mysqlSuggest["ERR.001"] = advisor.RuleMySQLError("ERR.001", vEnv.Error)
-							common.Log.Error("BuildVirtualEnv DDL Execute Error : %v", vEnv.Error)
+							mysqlSuggest["ERR.001"] = advisor.RuleMySQLError("ERR.001", env.GetVirtualEnv().Error)
+							common.Log.Error("BuildVirtualEnv DDL Execute Error : %v", env.GetVirtualEnv().Error)
 						}
 					}
 				}
@@ -294,13 +293,13 @@ func main() {
 			// 因为 EXPLAIN 依赖数据库环境，所以把这段逻辑放在启发式建议和索引建议后面
 			if common.Config.Explain {
 				// 执行 EXPLAIN
-				explainInfo, err := rEnv.Explain(q.Query,
+				explainInfo, err := env.GetRealEnv().Explain(q.Query,
 					database.ExplainType[common.Config.ExplainType],
 					database.ExplainFormatType[common.Config.ExplainFormat])
 				if err != nil {
 					// 线上环境执行失败才到测试环境 EXPLAIN，比如在用户提供建表语句及查询语句的场景
 					common.Log.Warn("rEnv.Explain Warn: %v", err)
-					explainInfo, err = vEnv.Explain(q.Query,
+					explainInfo, err = env.GetVirtualEnv().Explain(q.Query,
 						database.ExplainType[common.Config.ExplainType],
 						database.ExplainFormatType[common.Config.ExplainFormat])
 					if err != nil {
@@ -323,7 +322,7 @@ func main() {
 		// +++++++++++++++++++++ Profiling [开始]+++++++++++++++++++++++++{
 		common.Log.Debug("start of profiling Query: %s", q.Query)
 		if common.Config.Profiling {
-			res, err := vEnv.Profiling(q.Query)
+			res, err := env.GetVirtualEnv().Profiling(q.Query)
 			if err == nil {
 				proSuggest["PRO.001"] = advisor.Rule{
 					Item:     "PRO.001",
@@ -340,7 +339,7 @@ func main() {
 		// +++++++++++++++++++++ Trace [开始]+++++++++++++++++++++++++{
 		common.Log.Debug("start of trace Query: %s", q.Query)
 		if common.Config.Trace {
-			res, err := vEnv.Trace(q.Query)
+			res, err := env.GetVirtualEnv().Trace(q.Query)
 			if err == nil {
 				traceSuggest["TRA.001"] = advisor.Rule{
 					Item:     "TRA.001",
@@ -383,7 +382,7 @@ func main() {
 				}
 				// SQL 转写需要的源信息采集，如果没有配置环境则只做有限改写
 				meta := ast.GetMeta(rw.Stmt, nil)
-				rw.Columns = vEnv.GenTableColumns(meta)
+				rw.Columns = env.GetVirtualEnv().GenTableColumns(meta)
 				// 执行定义好的 SQL 重写规则
 				rw.Rewrite()
 				fmt.Println(strings.TrimSpace(rw.NewSQL))

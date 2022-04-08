@@ -19,6 +19,7 @@ package env
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/XiaoMi/soar/ast"
@@ -53,59 +54,77 @@ func NewVirtualEnv(vEnv *database.Connector) *VirtualEnv {
 	}
 }
 
+var virtualEnv *VirtualEnv
+var dbConn *database.Connector
+var envOnce sync.Once
+
+func GetVirtualEnv() *VirtualEnv {
+	BuildEnv()
+	return virtualEnv
+}
+
+func GetRealEnv() *database.Connector {
+	BuildEnv()
+	return dbConn
+}
+
 // BuildEnv 测试环境初始化&连接线上环境检查
 // @output *VirtualEnv	测试环境
 // @output *database.Connector 线上环境连接句柄
 func BuildEnv() (*VirtualEnv, *database.Connector) {
-	connTest, err := database.NewConnector(common.Config.TestDSN)
-	common.LogIfError(err, "")
-	// 生成测试环境
-	vEnv := NewVirtualEnv(connTest)
+	envOnce.Do(func() {
+		connTest, err := database.NewConnector(common.Config.TestDSN)
+		common.LogIfError(err, "")
+		// 生成测试环境
+		vEnv := NewVirtualEnv(connTest)
 
-	// 检查测试环境可用性，并记录数据库版本
-	vEnvVersion, err := vEnv.Version()
-	common.Config.TestDSN.Version = vEnvVersion
-	if err != nil {
-		common.Log.Warn("BuildEnv TestDSN: %s:********@%s/%s not available , Error: %s",
-			vEnv.User, vEnv.Addr, vEnv.Database, err.Error())
-		common.Config.TestDSN.Disable = true
-	}
+		// 检查测试环境可用性，并记录数据库版本
+		vEnvVersion, err := vEnv.Version()
+		common.Config.TestDSN.Version = vEnvVersion
+		if err != nil {
+			common.Log.Warn("BuildEnv TestDSN: %s:********@%s/%s not available , Error: %s",
+				vEnv.User, vEnv.Addr, vEnv.Database, err.Error())
+			common.Config.TestDSN.Disable = true
+		}
 
-	// 连接线上环境
-	// 如果未配置线上环境线测试环境配置为线上环境
-	if common.Config.OnlineDSN.User == "" {
-		common.Log.Warn("BuildEnv AllowOnlineAsTest: OnlineDSN not config, use TestDSN： %s:********@%s/%s as OnlineDSN",
-			vEnv.User, vEnv.Addr, vEnv.Database)
-		common.Config.OnlineDSN = common.Config.TestDSN
-	}
-	connOnline, err := database.NewConnector(common.Config.OnlineDSN)
-	common.LogIfError(err, "")
+		// 连接线上环境
+		// 如果未配置线上环境线测试环境配置为线上环境
+		if common.Config.OnlineDSN.User == "" {
+			common.Log.Warn("BuildEnv AllowOnlineAsTest: OnlineDSN not config, use TestDSN： %s:********@%s/%s as OnlineDSN",
+				vEnv.User, vEnv.Addr, vEnv.Database)
+			common.Config.OnlineDSN = common.Config.TestDSN
+		}
+		connOnline, err := database.NewConnector(common.Config.OnlineDSN)
+		common.LogIfError(err, "")
 
-	// 检查线上环境可用性版本
-	rEnvVersion, err := connOnline.Version()
-	common.Config.OnlineDSN.Version = rEnvVersion
-	if err != nil {
-		common.Log.Warn("BuildEnv OnlineDSN: %s:********@%s/%s not available , Error: %s",
-			connOnline.User, connOnline.Addr, connOnline.Database, err.Error())
-		common.Config.TestDSN.Disable = true
-	}
+		// 检查线上环境可用性版本
+		rEnvVersion, err := connOnline.Version()
+		common.Config.OnlineDSN.Version = rEnvVersion
+		if err != nil {
+			common.Log.Warn("BuildEnv OnlineDSN: %s:********@%s/%s not available , Error: %s",
+				connOnline.User, connOnline.Addr, connOnline.Database, err.Error())
+			common.Config.TestDSN.Disable = true
+		}
 
-	// 检查是否允许 Online 和 Test 一致，防止误操作
-	if common.FormatDSN(common.Config.OnlineDSN) == common.FormatDSN(common.Config.TestDSN) &&
-		!common.Config.AllowOnlineAsTest {
-		common.Log.Warn("BuildEnv AllowOnlineAsTest: %s:********@%s/%s OnlineDSN can't config as TestDSN",
-			vEnv.User, vEnv.Addr, vEnv.Database)
-		common.Config.TestDSN.Disable = true
-		common.Config.OnlineDSN.Disable = true
-	}
+		// 检查是否允许 Online 和 Test 一致，防止误操作
+		if common.FormatDSN(common.Config.OnlineDSN) == common.FormatDSN(common.Config.TestDSN) &&
+			!common.Config.AllowOnlineAsTest {
+			common.Log.Warn("BuildEnv AllowOnlineAsTest: %s:********@%s/%s OnlineDSN can't config as TestDSN",
+				vEnv.User, vEnv.Addr, vEnv.Database)
+			common.Config.TestDSN.Disable = true
+			common.Config.OnlineDSN.Disable = true
+		}
 
-	// 判断测试环境与线上环境版本是否一致，要求测试环境版本不低于线上环境
-	if vEnvVersion < rEnvVersion {
-		common.Log.Warning("TestDSN MySQL version older than OnlineDSN(%d), TestDSN(%d) will not be used", rEnvVersion, vEnvVersion)
-		common.Config.TestDSN.Disable = true
-	}
+		// 判断测试环境与线上环境版本是否一致，要求测试环境版本不低于线上环境
+		if vEnvVersion < rEnvVersion {
+			common.Log.Warning("TestDSN MySQL version older than OnlineDSN(%d), TestDSN(%d) will not be used", rEnvVersion, vEnvVersion)
+			common.Config.TestDSN.Disable = true
+		}
+		virtualEnv = vEnv
+		dbConn = connOnline
+	})
 
-	return vEnv, connOnline
+	return virtualEnv, dbConn
 }
 
 // RealDB 从测试环境中获取通过 hash 后的 DB
