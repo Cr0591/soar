@@ -39,7 +39,6 @@ func main() {
 	var sql string                                            // 单条评审指定的 sql 或 explain
 	var currentDB string                                      // 当前 SQL 使用的 database
 	sqlCounter := 1                                           // SQL 计数器
-	lineCounter := 1                                          // 行计数器
 	var alterSQLs []string                                    // 待评审的 SQL 中所有 ALTER 请求
 	alterTableTimes := make(map[string]int)                   // 待评审的 SQL 中同一经表 ALTER 请求计数器
 	suggestMerged := make(map[string]map[string]advisor.Rule) // 优化建议去重, key 为 sql 的 fingerprint.ID
@@ -87,7 +86,6 @@ func main() {
 
 	// 读入待优化 SQL ，当配置文件或命令行参数未指定 SQL 时从管道读取
 	buf := initQuery(common.Config.Query)
-	lineCounter += ast.LeftNewLines([]byte(buf))
 	buf = strings.TrimSpace(buf)
 
 	// remove bom from file header
@@ -113,17 +111,12 @@ func main() {
 			break
 		}
 		// 查询请求切分
-		orgSQL, sql, bufBytes := ast.SplitStatement([]byte(buf), []byte(common.Config.Delimiter))
+		_, sql, bufBytes := ast.SplitStatement([]byte(buf), []byte(common.Config.Delimiter))
 		// lineCounter
-		lc := ast.NewLines([]byte(orgSQL))
 		// leftLineCounter
-		llc := ast.LeftNewLines([]byte(orgSQL))
-		lineCounter += llc
 		if len(buf) == len(bufBytes) {
 			// 防止切分死循环，当剩余的内容和原 SQL 相同时直接清空 buf
 			buf = ""
-			orgSQL = string(bufBytes)
-			sql = orgSQL
 		} else {
 			buf = string(bufBytes)
 		}
@@ -412,24 +405,6 @@ func main() {
 		case "tables":
 		case "duplicate-key-checker":
 		case "rewrite":
-		case "lint":
-			for _, s := range strings.Split(str, "\n") {
-				// ignore empty output
-				if strings.TrimSpace(s) == "" {
-					continue
-				}
-
-				if common.Config.Query != "" {
-					if _, err = os.Stat(common.Config.Query); err == nil {
-						fmt.Printf("%s:%d:%s\n", common.Config.Query, lineCounter, s)
-					} else {
-						fmt.Printf("null:%d:%s\n", lineCounter, s)
-					}
-				} else {
-					fmt.Printf("stdin:%d:%s\n", lineCounter, s)
-				}
-			}
-			lineCounter += lc - llc
 		case "html":
 			fmt.Println(common.Markdown2HTML(str))
 		default:
