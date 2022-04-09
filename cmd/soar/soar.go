@@ -17,7 +17,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -27,23 +26,15 @@ import (
 	"github.com/XiaoMi/soar/common"
 	"github.com/XiaoMi/soar/database"
 	"github.com/XiaoMi/soar/env"
+	"github.com/percona/go-mysql/query"
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/kr/pretty"
-	"github.com/percona/go-mysql/query"
 )
 
 func main() {
 	// 全局变量
-	var err error
-	var sql string                                            // 单条评审指定的 sql 或 explain
-	var currentDB string                                      // 当前 SQL 使用的 database
-	sqlCounter := 1                                           // SQL 计数器
-	var alterSQLs []string                                    // 待评审的 SQL 中所有 ALTER 请求
-	alterTableTimes := make(map[string]int)                   // 待评审的 SQL 中同一经表 ALTER 请求计数器
-	suggestMerged := make(map[string]map[string]advisor.Rule) // 优化建议去重, key 为 sql 的 fingerprint.ID
-	var suggestStr []string                                   // string 形式格式化之后的优化建议，用于 -report-type json
-	tables := make(map[string][]string)                       // SQL 使用的库表名
+	var currentDB string // 当前 SQL 使用的 database
 
 	// 配置文件&命令行参数解析
 	initConfig()
@@ -83,8 +74,22 @@ func main() {
 		return
 	}
 
+	verboseInfo()
+}
+
+func getMDSuggest(querySQL string) string {
+	var err error
+	var sql string                                            // 单条评审指定的 sql 或 explain
+	var currentDB string                                      // 当前 SQL 使用的 database
+	sqlCounter := 1                                           // SQL 计数器
+	var alterSQLs []string                                    // 待评审的 SQL 中所有 ALTER 请求
+	alterTableTimes := make(map[string]int)                   // 待评审的 SQL 中同一经表 ALTER 请求计数器
+	suggestMerged := make(map[string]map[string]advisor.Rule) // 优化建议去重, key 为 sql 的 fingerprint.ID
+	var suggestStr []string                                   // string 形式格式化之后的优化建议，用于 -report-type json
+	tables := make(map[string][]string)                       // SQL 使用的库表名
+
 	// 读入待优化 SQL ，当配置文件或命令行参数未指定 SQL 时从管道读取
-	buf := initQuery(common.Config.Query)
+	buf := initQuery(querySQL)
 	buf = strings.TrimSpace(buf)
 
 	// remove bom from file header
@@ -406,37 +411,39 @@ func main() {
 		case "html":
 			fmt.Println(common.Markdown2HTML(str))
 		default:
-			fmt.Println(str)
+			// fmt.Println(str)
+			suggestStr = append(suggestStr, str)
 		}
 		common.Log.Debug("end of print suggestions, Query: %s", q.Query)
 		// +++++++++++++++++++++打印单条 SQL 优化建议[结束]++++++++++++++++++++++++++}
 	}
 
 	// 同一张表的多条 ALTER 语句合并为一条
-	if ast.RewriteRuleMatch("mergealter") {
-		for _, v := range ast.MergeAlterTables(alterSQLs...) {
-			fmt.Println(strings.TrimSpace(v))
-		}
-		return
-	}
+	// if ast.RewriteRuleMatch("mergealter") {
+	// 	for _, v := range ast.MergeAlterTables(alterSQLs...) {
+	// 		fmt.Println(strings.TrimSpace(v))
+	// 	}
+	// 	return
+	// }
 
 	// 以 JSON 格式化输出
 	if common.Config.ReportType == "json" {
-		fmt.Println("[\n", strings.Join(suggestStr, ",\n"), "\n]")
+		return "[\n" + strings.Join(suggestStr, ",\n") + "\n]"
 	}
 
 	// 以 JSON 格式输出 SQL 影响的库表名
-	if common.Config.ReportType == "tables" {
-		js, err := json.MarshalIndent(tables, "", "  ")
-		if err == nil {
-			fmt.Println(string(js))
-		} else {
-			common.Log.Error("FormatSuggest json.Marshal Error: %v", err)
-		}
-		return
-	}
+	// if common.Config.ReportType == "tables" {
+	// 	js, err := json.MarshalIndent(tables, "", "  ")
+	// 	if err == nil {
+	// 		fmt.Println(string(js))
+	// 	} else {
+	// 		common.Log.Error("FormatSuggest json.Marshal Error: %v", err)
+	// 	}
+	// 	return
+	// }
 
 	verboseInfo()
+	return strings.Join(suggestStr, ",\n")
 }
 
 func getSuggest(sql string, alterSQLs []string, alterTableTimes map[string]int) (heuristicSuggest, expSuggest, idxSuggest, proSuggest, traceSuggest, mysqlSuggest map[string]advisor.Rule,
