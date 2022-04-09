@@ -10,6 +10,7 @@ require (
 	github.com/astaxie/beego v1.12.3
 	github.com/buger/jsonparser v1.1.1 // indirect
 	github.com/codegangsta/inject v0.0.0-20150114235600-33e0aa1cb7c0 // indirect
+	github.com/coreos/etcd v3.3.13+incompatible // indirect
 	github.com/cyberdelia/go-metrics-graphite v0.0.0-20161219230853-39f87cc3b432 // indirect
 	github.com/dchest/uniuri v0.0.0-20200228104902-7aecb25e1fe5
 	github.com/gedex/inflector v0.0.0-20170307190818-16278e9db813
@@ -26,6 +27,7 @@ require (
 	github.com/hashicorp/serf v0.9.2 // indirect
 	github.com/howeyc/gopass v0.0.0-20190910152052-7cb4b85ec19c // indirect
 	github.com/jeremywohl/flatten v0.0.0-20190921043622-d936035e55cf // indirect
+	github.com/kataras/iris/v12 v12.2.0-alpha9.0.20220318202522-45d693850bee // indirect
 	github.com/klauspost/pgzip v1.2.4 // indirect
 	github.com/konsorten/go-windows-terminal-sequences v1.0.3 // indirect
 	github.com/kr/pretty v0.2.1
@@ -35,7 +37,6 @@ require (
 	github.com/martini-contrib/render v0.0.0-20150707142108-ec18f8345a11 // indirect
 	github.com/mitchellh/go-ps v1.0.0 // indirect
 	github.com/mitchellh/go-testing-interface v1.14.0 // indirect
-	github.com/mitchellh/mapstructure v1.2.3 // indirect
 	github.com/montanaflynn/stats v0.6.3 // indirect
 	github.com/olekukonko/tablewriter v0.0.5-0.20200416053754-163badb3bac6 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
@@ -54,14 +55,10 @@ require (
 	github.com/shirou/gopsutil v3.21.2+incompatible // indirect
 	github.com/sirupsen/logrus v1.8.1 // indirect
 	github.com/sjmudd/stopwatch v0.0.0-20170613150411-f380bf8a9be1 // indirect
-	github.com/spf13/cobra v1.1.1 // indirect
 	github.com/spyzhov/ajson v0.4.2 // indirect
 	github.com/tidwall/gjson v1.12.1
 	go.uber.org/multierr v1.7.0 // indirect
 	go.uber.org/zap v1.17.0 // indirect
-	golang.org/x/lint v0.0.0-20200302205851-738671d3881b // indirect
-	golang.org/x/sys v0.0.0-20210601080250-7ecdf8ef093b // indirect
-	golang.org/x/text v0.3.6 // indirect
 	gopkg.in/gcfg.v1 v1.2.3 // indirect
 	gopkg.in/warnings.v0 v0.1.2 // indirect
 	gopkg.in/yaml.v2 v2.4.0

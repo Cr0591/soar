@@ -111,8 +111,7 @@ func main() {
 		}
 		// 查询请求切分
 		_, sql, bufBytes := ast.SplitStatement([]byte(buf), []byte(common.Config.Delimiter))
-		// lineCounter
-		// leftLineCounter
+
 		if len(buf) == len(bufBytes) {
 			// 防止切分死循环，当剩余的内容和原 SQL 相同时直接清空 buf
 			buf = ""
@@ -438,4 +437,213 @@ func main() {
 	}
 
 	verboseInfo()
+}
+
+func getSuggest(sql string, alterSQLs []string, alterTableTimes map[string]int) (heuristicSuggest, expSuggest, idxSuggest, proSuggest, traceSuggest, mysqlSuggest map[string]advisor.Rule,
+	rAlterSQLs []string) {
+	heuristicSuggest = make(map[string]advisor.Rule) // 启发式建议
+	expSuggest = make(map[string]advisor.Rule)       // EXPLAIN 解读
+	idxSuggest = make(map[string]advisor.Rule)       // 索引建议
+	proSuggest = make(map[string]advisor.Rule)       // Profiling 信息
+	traceSuggest = make(map[string]advisor.Rule)     // Trace 信息
+	mysqlSuggest = make(map[string]advisor.Rule)     // MySQL 返回的 ERROR 信息
+	sql = database.RemoveSQLComments(sql)
+	if sql == "" {
+		common.Log.Debug("empty sql")
+		return
+	}
+	common.Log.Debug("analyse SQL: %s", sql)
+	// SQL 签名
+	// +++++++++++++++++++++语法检查[开始]+++++++++++++++++++++++{
+	q, syntaxErr := advisor.NewQuery4Audit(sql)
+	stmt := q.Stmt
+
+	// 如果语法检查出错则不需要给优化建议
+	if syntaxErr != nil {
+		errContent := fmt.Sprintf("At SQL %s : %v", sql, syntaxErr)
+		common.Log.Warning(errContent)
+		if common.Config.OnlySyntaxCheck || common.Config.ReportType == "rewrite" ||
+			common.Config.ReportType == "query-type" {
+			fmt.Println(errContent)
+			os.Exit(1)
+		}
+		// tidb parser 语法检查给出的建议 ERR.000
+		mysqlSuggest["ERR.000"] = advisor.RuleMySQLError("ERR.000", syntaxErr)
+	}
+	// 如果只想检查语法直接跳过后面的步骤
+	if common.Config.OnlySyntaxCheck {
+		return
+	}
+	// +++++++++++++++++++++语法检查[结束]+++++++++++++++++++++++}
+	// +++++++++++++++++++++启发式规则建议[开始]+++++++++++++++++++++++{
+	common.Log.Debug("start of heuristic advisor Query: %s", q.Query)
+	for item, rule := range advisor.HeuristicRules {
+		// 去除忽略的建议检查
+		okFunc := (*advisor.Query4Audit).RuleOK
+		if !advisor.IsIgnoreRule(item) && &rule.Func != &okFunc {
+			r := rule.Func(q)
+			if r.Item == item {
+				heuristicSuggest[item] = r
+			}
+		}
+	}
+	common.Log.Debug("end of heuristic advisor Query: %s", q.Query)
+	// +++++++++++++++++++++启发式规则建议[结束]+++++++++++++++++++++++}
+	// +++++++++++++++++++++索引优化建议[开始]+++++++++++++++++++++++{
+	// 如果配置了索引建议过滤规则，不进行索引优化建议
+	// 在配置文件 ignore-rules 中添加 'IDX.*' 即可屏蔽索引优化建议
+	common.Log.Debug("start of index advisor Query: %s", q.Query)
+	if !advisor.IsIgnoreRule("IDX.") {
+		if env.GetVirtualEnv().BuildVirtualEnv(env.GetRealEnv(), q.Query) {
+			idxAdvisor, err := advisor.NewAdvisor(env.GetVirtualEnv(), *env.GetRealEnv(), *q)
+			if err != nil || (idxAdvisor == nil && env.GetVirtualEnv().Error == nil) {
+				if idxAdvisor == nil {
+					// 如果 SQL 是 DDL 语句，则返回的 idxAdvisor 为 nil，可以忽略不处理
+					// TODO alter table add index 语句检查索引是否已经存在
+					common.Log.Debug("idxAdvisor by pass Query: %s", q.Query)
+				} else {
+					common.Log.Warning("advisor.NewAdvisor Error: %v", err)
+				}
+			} else {
+				// 创建环境时没有出现错误，生成索引建议
+				if env.GetVirtualEnv().Error == nil {
+					idxSuggest = idxAdvisor.IndexAdvise().Format()
+
+					// 依赖数据字典的启发式建议
+					for i, r := range idxAdvisor.HeuristicCheck(*q) {
+						heuristicSuggest[i] = r
+					}
+				} else {
+					// 根据错误号输出建议
+					switch env.GetVirtualEnv().Error.(*mysql.MySQLError).Number {
+					case 1061:
+						idxSuggest["IDX.001"] = advisor.Rule{
+							Item:     "IDX.001",
+							Severity: "L2",
+							Summary:  "索引名称已存在",
+							Content:  strings.Trim(strings.Split(env.GetVirtualEnv().Error.Error(), ":")[1], " "),
+							Case:     sql,
+						}
+					default:
+						// vEnv.VEnvBuild 阶段给出的 ERROR 是 ERR.001
+						delete(mysqlSuggest, "ERR.000")
+						mysqlSuggest["ERR.001"] = advisor.RuleMySQLError("ERR.001", env.GetVirtualEnv().Error)
+						common.Log.Error("BuildVirtualEnv DDL Execute Error : %v", env.GetVirtualEnv().Error)
+					}
+				}
+			}
+		} else {
+			common.Log.Error("vEnv.BuildVirtualEnv Error: prepare SQL '%s' in vEnv failed.", q.Query)
+		}
+	}
+	common.Log.Debug("end of index advisor Query: %s", q.Query)
+	// +++++++++++++++++++++索引优化建议[结束]+++++++++++++++++++++++}
+
+	// +++++++++++++++++++++EXPLAIN 建议[开始]+++++++++++++++++++++++{
+	// 如果未配置 Online 或 Test 无法给 Explain 建议
+	common.Log.Debug("start of explain Query: %s", q.Query)
+	if !common.Config.OnlineDSN.Disable && !common.Config.TestDSN.Disable {
+		// 因为 EXPLAIN 依赖数据库环境，所以把这段逻辑放在启发式建议和索引建议后面
+		if common.Config.Explain {
+			// 执行 EXPLAIN
+			explainInfo, err := env.GetRealEnv().Explain(q.Query,
+				database.ExplainType[common.Config.ExplainType],
+				database.ExplainFormatType[common.Config.ExplainFormat])
+			if err != nil {
+				// 线上环境执行失败才到测试环境 EXPLAIN，比如在用户提供建表语句及查询语句的场景
+				common.Log.Warn("rEnv.Explain Warn: %v", err)
+				explainInfo, err = env.GetVirtualEnv().Explain(q.Query,
+					database.ExplainType[common.Config.ExplainType],
+					database.ExplainFormatType[common.Config.ExplainFormat])
+				if err != nil {
+					// EXPLAIN 阶段给出的 ERROR 是 ERR.002
+					mysqlSuggest["ERR.002"] = advisor.RuleMySQLError("ERR.002", err)
+					common.Log.Error("vEnv.Explain Error: %v", err)
+				}
+			}
+			// 分析 EXPLAIN 结果
+			if explainInfo != nil {
+				expSuggest = advisor.ExplainAdvisor(explainInfo)
+			} else {
+				common.Log.Warn("rEnv&vEnv.Explain explainInfo nil, SQL: %s", q.Query)
+			}
+		}
+	}
+	common.Log.Debug("end of explain Query: %s", q.Query)
+	// +++++++++++++++++++++ EXPLAIN 建议[结束]+++++++++++++++++++++++}
+
+	// +++++++++++++++++++++ Profiling [开始]+++++++++++++++++++++++++{
+	common.Log.Debug("start of profiling Query: %s", q.Query)
+	if common.Config.Profiling {
+		res, err := env.GetVirtualEnv().Profiling(q.Query)
+		if err == nil {
+			proSuggest["PRO.001"] = advisor.Rule{
+				Item:     "PRO.001",
+				Severity: "L0",
+				Content:  database.FormatProfiling(res),
+			}
+		} else {
+			common.Log.Error("Profiling Error: %v", err)
+		}
+	}
+	common.Log.Debug("end of profiling Query: %s", q.Query)
+	// +++++++++++++++++++++ Profiling [结束]++++++++++++++++++++++++++}
+
+	// +++++++++++++++++++++ Trace [开始]+++++++++++++++++++++++++{
+	common.Log.Debug("start of trace Query: %s", q.Query)
+	if common.Config.Trace {
+		res, err := env.GetVirtualEnv().Trace(q.Query)
+		if err == nil {
+			traceSuggest["TRA.001"] = advisor.Rule{
+				Item:     "TRA.001",
+				Severity: "L0",
+				Content:  database.FormatTrace(res),
+			}
+		} else {
+			common.Log.Error("Trace Error: %v", err)
+		}
+	}
+	common.Log.Debug("end of trace Query: %s", q.Query)
+	// +++++++++++++++++++++Trace [结束]++++++++++++++++++++++++++}
+
+	// +++++++++++++++++++++SQL 重写[开始]+++++++++++++++++++++++++{
+	common.Log.Debug("start of rewrite Query: %s", q.Query)
+	if common.Config.ReportType == "rewrite" {
+		if strings.HasPrefix(strings.TrimSpace(strings.ToLower(sql)), "create") ||
+			strings.HasPrefix(strings.TrimSpace(strings.ToLower(sql)), "alter") ||
+			strings.HasPrefix(strings.TrimSpace(strings.ToLower(sql)), "rename") {
+			// 依赖上下文件的 SQL 重写，如：多条 ALTER SQL 合并
+			// vitess 对 DDL 语法的支持不好，大部分 DDL 会语法解析出错，但即使出错了还是会生成一个 stmt 而且里面的 db.table 还是准确的。
+
+			alterSQLs = append(alterSQLs, sql)
+			rAlterSQLs = alterSQLs
+			alterTbl := ast.AlterAffectTable(stmt)
+			if alterTbl != "" && alterTbl != "dual" {
+				if _, ok := alterTableTimes[alterTbl]; ok {
+					heuristicSuggest["ALT.002"] = advisor.HeuristicRules["ALT.002"]
+					alterTableTimes[alterTbl] = alterTableTimes[alterTbl] + 1
+				} else {
+					alterTableTimes[alterTbl] = 1
+				}
+			}
+		} else {
+			// 其他不依赖上下文件的 SQL 重写
+			rw := ast.NewRewrite(sql)
+			if rw == nil {
+				// 都到这一步了 sql 不会语法不正确，因此 rw 一般不会为 nil
+				common.Log.Critical("NewRewrite nil point error, SQL: %s", sql)
+				os.Exit(1)
+			}
+			// SQL 转写需要的源信息采集，如果没有配置环境则只做有限改写
+			meta := ast.GetMeta(rw.Stmt, nil)
+			rw.Columns = env.GetVirtualEnv().GenTableColumns(meta)
+			// 执行定义好的 SQL 重写规则
+			rw.Rewrite()
+			fmt.Println(strings.TrimSpace(rw.NewSQL))
+		}
+	}
+	common.Log.Debug("end of rewrite Query: %s", q.Query)
+	// +++++++++++++++++++++ SQL 重写[结束]++++++++++++++++++++++++++}
+
+	return
 }

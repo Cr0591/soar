@@ -121,6 +121,17 @@ build: fmt
 	done ; exit $$ret
 	@echo "build Success!"
 
+tbuild: 
+	@echo "$(CGREEN)Building ...$(CEND)"
+	@mkdir -p bin
+	@ret=0 && for d in $$(go list -f '{{if (eq .Name "main")}}{{.ImportPath}}{{end}}' ./...); do \
+		b=$$(basename $${d}) ; \
+		echo ${LDFLAGS} ;\
+		echo ${GCFLAGS} ;\
+		echo $${d} ;\
+	done ; exit $$ret
+	@echo "build Success!"
+
 # Installs our project: copies binaries
 install: build
 	@echo "$(CGREEN)Install ...$(CEND)"
